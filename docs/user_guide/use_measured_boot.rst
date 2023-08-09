@@ -132,3 +132,116 @@ While an operator can attempt to write its own policy from scratch, it is
 recommended that one just copies `example.py` into `mypolicy.py`, change it as
 required and then just points to this new policy on `keylime.conf`
 (`measured_boot_policy_name`) for its own use.
+
+Using OPA policy engine 
+---------------------- 
+Keylime, by default, uses elchecking policy engine (as explained above) to 
+evaluate measured boot log for the specified policy and the refstate. In this
+approach, the policy, specified using the verifier configuration item 
+``measured_boot_policy_name`` in ``keylime.conf``, must be implemented in the module
+specified with the verifier configuration item ``measured_boot_imports``. The policy
+uses the refstate, passed with ``--mb_refstate`` option of the ``keylime_tenant`` command,
+to evaluate the boot log and provides the result. In case of failure, it also 
+provides the reasons of failure. If a new policy needs to be created or an existing policy
+needs to be modified, the policy module would have to modified and then the 
+verifier would have to be reconfigured and restarted for using the new/modified
+policy.
+
+Keylime provides `OPA <https://www.openpolicyagent.org/>`_ policy engine as an alternate option to evaluate the measured
+boot log against a policy containing the refstate. In this approach, user provides
+the policy for the refstate (using the same option i.e. ``--mb_refstate`` of the
+``keylime_tenant`` command) and the OPA policy engine evaluates the boot log 
+against the policy. The policy is written in `rego <https://www.openpolicyagent.org/docs/latest/policy-language/>`_ which is the query language
+for OPA. In this case, user can easily create a new policy or modify an existing
+one and use it without restarting the verifier. Currently, OPA policy engine 
+interacts with an OPA server using REST API to evaluate the boot log. OPA server
+could be run on the same node as verifier itself. 
+
+To use OPA policy engine, user needs to specify 'keylime.mba.opa' for the
+verifier configuration item ``measured_boot_imports`` and provide the info
+(i.e. ip address, port and path of the certificate file for secure 
+communication with SSL) about the OPA server using the verifier configuration
+items ``opa_server_ip``, ``opa_server_port`` and ``opa_server_cert``. By default, the 
+OPA server is expected to run on the same node as the verifier 
+(i.e. ``opa_server_ip=127.0.0.1``), with its default port (i.e. ``opa_server_port=8181``)
+and without the need of SSL communication.
+
+After `downloading OPA <https://www.openpolicyagent.org/docs/latest/#running-opa>`_, one could start the OPA server as follows::
+
+    opa run --server
+
+If the SSL communication is needed, one needs to specify the path of certificate file to 
+the verifier configuration item ``opa_server_cert`` and start the OPA server
+by using the certificate with ``--tls-cert-file`` option as follows::
+
+    opa run --server --tls-cert-file=<certificate> --tls-private-key-file=<private-key>
+
+Once the OPA server and the verifier are started, user can pass the policy (say
+mb-refstate-policy.rego) with ``--mb_refstate`` option of the ``keylime_tenant`` command as 
+follows to evaluate the boot log while adding a node::
+
+    keylime_tenant -c add -t <AGENT IP> -v <VERIFIER IP> -u <AGENT UUID> --mb_refstate ./mb-refstate-policy.rego
+
+The policy file is required to have ``package`` name and an ``allow`` rule. Here is the
+simplest example of a policy to always pass the evaluation (similar to ``accept_all``
+policy defined with elchecking policy engine)::
+
+    package mbpolicy1
+    default allow := true
+
+Following example shows how to use the refstate with the policy::
+
+    package mbpolicy2
+    import future.keywords.if
+
+    refstate := {
+        "kernel_authcode_sha256": "d968af6fbb6210352455d1c67b49d7b3c414361c9ea1d2828ef15f6d5bac4d19",
+        "initrd_plain_sha256": "411a773dce24fddca247c8439182bf265504abb379be18f0f76df6ed3f575148"
+    }
+
+    # By default, do not allow.
+    default allow := false
+
+    # Allow only if the bootlog is validated succesfully against the refstate.
+    allow {
+        kernel_authcode_sha256_granted
+        initrd_plain_sha256_granted
+    }
+
+    kernel_authcode_sha256_granted if {
+        some i,j
+        input.events[i].EventType == "EV_EFI_BOOT_SERVICES_APPLICATION"
+        input.events[i].PCRIndex == 4
+        input.events[i].Digests[j].AlgorithmId == "sha256"
+        input.events[i].Digests[j].Digest == refstate.kernel_authcode_sha256
+    }
+
+    initrd_plain_sha256_granted if {
+        some i,j
+        input.events[i].EventType == "EV_IPL"
+        input.events[i].PCRIndex == 9
+        input.events[i].Digests[j].AlgorithmId == "sha256"
+        input.events[i].Digests[j].Digest == refstate.initrd_plain_sha256
+    }
+
+    # If denied, return the reasons
+    allow = denied {
+        count(denied) > 0
+    }
+
+    denied[reason] {
+        not initrd_plain_sha256_granted
+        reason := "initrd_plain_sha256 is not valid."
+    }
+
+    denied[reason] {
+        not kernel_authcode_sha256_granted
+        reason := "kernel_authcode_sha256 is not valid."
+    }
+
+The above example also shows how to return the reasons of validation failure.
+In the above example, the variable ``input`` represents the content of
+measured boot log in json format. One could run the command ``tpm2_eventlog`` on the 
+content of ``/sys/kernel/security/tpm0/binary_bios_measurements`` to get the measured boot
+log which can be used to get the info (e.g. EventType, PCRIndex, Digests*)
+about various events for creating a policy using refstate.

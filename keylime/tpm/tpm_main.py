@@ -351,6 +351,7 @@ class Tpm:
                     mb_measurement_data,
                     pcrs_in_quote,
                     agentAttestState.get_agent_id(),
+                    count,
                 )
                 failure.merge(mb_policy_failure)
 
@@ -360,6 +361,7 @@ class Tpm:
                     mb_measurement_data,
                     pcrs_in_quote,
                     agentAttestState.get_agent_id(),
+                    count,
                 )
                 failure.merge(mb_policy_failure)
 

@@ -2,8 +2,10 @@ import importlib
 from inspect import isfunction
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
-from keylime import config
+from keylime import config, keylime_logging
 from keylime.failure import Failure
+
+logger = keylime_logging.init_logging("mba")
 
 # #########
 # Pluggable MBA theory of operations
@@ -156,6 +158,7 @@ def bootlog_evaluate(
     measurement_data: MBLog,
     pcrsInQuote: Set[int],
     agent_id: str,
+    attestation_count: int,
 ) -> Failure:
     """
     MBA API front-end for evaluating a measured boot event log against a policy.
@@ -167,7 +170,8 @@ def bootlog_evaluate(
     """
     try:
         m = _find_implementation("bootlog_evaluate")
-        return m.bootlog_evaluate(policy_data, measurement_data, pcrsInQuote, agent_id)  # type: ignore[no-any-return]
+        logger.info("Using %s to evaluate bootlog for measured boot attestation.", m.__name__)
+        return m.bootlog_evaluate(policy_data, measurement_data, pcrsInQuote, agent_id, attestation_count)  # type: ignore[no-any-return]
     except Exception as e:
         raise ValueError from e
 

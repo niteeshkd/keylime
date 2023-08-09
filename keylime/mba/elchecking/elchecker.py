@@ -51,6 +51,7 @@ def bootlog_evaluate(
     mb_measurement_data: tests.Data,
     pcrs_inquote: Set[int],
     agent_id: str,
+    attestation_count: int,
 ) -> Failure:
     """
     Evaluating a measured boot event log against a policy
@@ -58,6 +59,7 @@ def bootlog_evaluate(
     :param measurement_data: parsed measured boot event log as produced by `parse_bootlog`
     :param pcrsInQuote: a set of PCRs provided by the quote.
     :param agent_id: the UUID of the keylime agent sending this data.
+    :param attestation_count: number of times the measured boot attestation has been done.
     :returns: list of all failures encountered while evaluating the boot log against the policy.
     """
     failure = Failure(Component.MEASURED_BOOT)

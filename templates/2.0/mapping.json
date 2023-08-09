@@ -317,7 +317,22 @@
             "measured_boot_imports": {
                 "section": "cloud_verifier",
                 "option": "measured_boot_imports",
-                "default": "[]"
+                "default": "[keylime.mba.opa]"
+            },
+	    "opa_server_ip": {
+                "section": "cloud_verifier",
+                "option": "opa_server_ip",
+                "default": "127.0.0.1"
+            },
+            "opa_server_port": {
+                "section": "cloud_verifier",
+                "option": "opa_server_port",
+                "default": "8181"
+            },
+	    "opa_server_cert": {
+                "section": "cloud_verifier",
+                "option": "opa_server_cert",
+                "default": ""
             },
 	    "measured_boot_evaluate": {
                 "section": "cloud_verifier",
