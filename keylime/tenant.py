@@ -1349,6 +1349,15 @@ class Tenant:
         if response.status_code >= 400:
             raise UserError(response_json)
 
+    def do_list_runtime_policy(self) -> None:  # pylint: disable=unused-argument
+        cv_client = RequestsClient(self.verifier_base_url, True, tls_context=self.tls_context)
+        response = cv_client.get(f"/v{self.api_version}/allowlists/", timeout=self.request_timeout)
+        print(f"list command response: {response.status_code}.")
+        response_json = Tenant._jsonify_response(response)
+
+        if response.status_code >= 400:
+            raise UserError(response_json)
+
     @staticmethod
     def _jsonify_response(
         response: requests.Response, print_response: bool = True, raise_except: bool = False
@@ -1396,7 +1405,7 @@ def main() -> None:
         help="valid commands are add,delete,update,"
         "regstatus,cvstatus,status,reglist,cvlist,reactivate,"
         "regdelete,bulkinfo,addruntimepolicy,showruntimepolicy,"
-        "deleteruntimepolicy,updateruntimepolicy. defaults to add",
+        "deleteruntimepolicy,updateruntimepolicy,listruntimepolicy. defaults to add",
     )
     parser.add_argument(
         "-t", "--targethost", action="store", dest="agent_ip", help="the IP address of the host to provision"
@@ -1772,5 +1781,7 @@ def main() -> None:
             mytenant.do_delete_runtime_policy(None)
     elif args.command == "updateruntimepolicy":
         mytenant.do_update_runtime_policy(vars(args))
+    elif args.command == "listruntimepolicy":
+        mytenant.do_list_runtime_policy()
     else:
         raise UserError(f"Invalid command specified: {args.command}")
