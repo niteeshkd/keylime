@@ -16,4 +16,4 @@ RUN git clone -b 5.5 https://github.com/tpm2-software/tpm2-tools.git && \
 ENV GOPATH=/root/go
 RUN --mount=target=/keylime,type=bind,source=.,rw \
     cd /keylime && ./installer.sh -o && \
-    dnf -y install python3-PyMySQL
+    dnf -y install python3-PyMySQL sqlite

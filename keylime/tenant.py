@@ -75,6 +75,7 @@ class Tenant:
     accept_tpm_signing_algs: List[str] = []
 
     mb_refstate = None
+    mb_refstate_name: str = ""
     supported_version: Optional[str] = None
 
     client_cert = None
@@ -301,6 +302,7 @@ class Tenant:
         (
             self.tpm_policy,
             self.mb_refstate,
+            self.mb_refstate_name,
             self.runtime_policy_name,
             self.ima_sign_verification_keys,
             self.runtime_policy,
@@ -584,6 +586,7 @@ class Tenant:
             "runtime_policy_name": self.runtime_policy_name,
             "runtime_policy_key": self.runtime_policy_key,
             "mb_refstate": self.mb_refstate,
+            "mb_refstate_name": self.mb_refstate_name,
             "ima_sign_verification_keys": self.ima_sign_verification_keys,
             "metadata": json.dumps(self.metadata),
             "revocation_key": self.revocation_key,
@@ -1291,6 +1294,7 @@ class Tenant:
         (
             self.tpm_policy,
             self.mb_refstate,
+            self.mb_refstate_name,
             self.runtime_policy_name,
             self.ima_sign_verification_keys,
             self.runtime_policy,
@@ -1349,6 +1353,79 @@ class Tenant:
         if response.status_code >= 400:
             raise UserError(response_json)
 
+    def __convert_mb_refstate(self, args: Dict[str, str]) -> str:
+        if args.get("mb_refstate_name") is None:
+            raise UserError("mb_refstate_name is required to add measure boot refstate")
+
+        (
+            self.tpm_policy,
+            self.mb_refstate,
+            self.mb_refstate_name,
+            self.runtime_policy_name,
+            self.ima_sign_verification_keys,
+            self.runtime_policy,
+            self.runtime_policy_key,
+        ) = policies.process_policy(cast(policies.ArgsType, args))
+
+        data = {
+            "mb_refstate": self.mb_refstate,
+        }
+        return json.dumps(data)
+
+    def do_add_mb_refstate(self, args: Dict[str, str]) -> None:
+        body = self.__convert_mb_refstate(args)
+
+        cv_client = RequestsClient(self.verifier_base_url, True, tls_context=self.tls_context)
+        response = cv_client.post(
+            f"/v{self.api_version}/mbrefstates/{self.mb_refstate_name}", data=body, timeout=self.request_timeout
+        )
+        response_json = Tenant._jsonify_response(response)
+
+        if response.status_code >= 400:
+            raise UserError(response_json)
+
+    def do_update_mb_refstate(self, args: Dict[str, str]) -> None:
+        body = self.__convert_mb_refstate(args)
+
+        cv_client = RequestsClient(self.verifier_base_url, True, tls_context=self.tls_context)
+        response = cv_client.put(
+            f"/v{self.api_version}/mbrefstates/{self.mb_refstate_name}", data=body, timeout=self.request_timeout
+        )
+        response_json = Tenant._jsonify_response(response)
+
+        if response.status_code >= 400:
+            raise UserError(response_json)
+
+    def do_delete_mb_refstate(self, name: Optional[str]) -> None:
+        if not name:
+            raise UserError("--mb_refstate_name is required to delete a runtime policy")
+        cv_client = RequestsClient(self.verifier_base_url, True, tls_context=self.tls_context)
+        response = cv_client.delete(f"/v{self.api_version}/mbrefstates/{name}", timeout=self.request_timeout)
+        response_json = Tenant._jsonify_response(response)
+
+        if response.status_code >= 400:
+            raise UserError(response_json)
+
+    def do_show_mb_refstate(self, name: Optional[str]) -> None:  # pylint: disable=unused-argument
+        if not name:
+            raise UserError("--mb_refstate_name is required to show a runtime policy")
+        cv_client = RequestsClient(self.verifier_base_url, True, tls_context=self.tls_context)
+        response = cv_client.get(f"/v{self.api_version}/mbrefstates/{name}", timeout=self.request_timeout)
+        print(f"Show mbrefstate command response: {response.status_code}.")
+        response_json = Tenant._jsonify_response(response)
+
+        if response.status_code >= 400:
+            raise UserError(response_json)
+
+    def do_list_mb_refstate(self) -> None:  # pylint: disable=unused-argument
+        cv_client = RequestsClient(self.verifier_base_url, True, tls_context=self.tls_context)
+        response = cv_client.get(f"/v{self.api_version}/mbrefstates/", timeout=self.request_timeout)
+        print(f"list command response: {response.status_code}.")
+        response_json = Tenant._jsonify_response(response)
+
+        if response.status_code >= 400:
+            raise UserError(response_json)
+
     @staticmethod
     def _jsonify_response(
         response: requests.Response, print_response: bool = True, raise_except: bool = False
@@ -1396,7 +1473,9 @@ def main() -> None:
         help="valid commands are add,delete,update,"
         "regstatus,cvstatus,status,reglist,cvlist,reactivate,"
         "regdelete,bulkinfo,addruntimepolicy,showruntimepolicy,"
-        "deleteruntimepolicy,updateruntimepolicy. defaults to add",
+        "deleteruntimepolicy,updateruntimepolicy,addmbrefstate,"
+        "showmbrefstate,deletembrefstate,updatembrefstate,listmbrefstate,"
+        "defaults to add",
     )
     parser.add_argument(
         "-t", "--targethost", action="store", dest="agent_ip", help="the IP address of the host to provision"
@@ -1579,6 +1658,13 @@ def main() -> None:
         help="DEPRECATED: Migrate to runtime policies for continued functionality. The name of allowlist to operate with",
     )
     parser.add_argument("--runtime-policy-name", help="The name of the runtime policy to operate with")
+    parser.add_argument(
+        "--mb-refstate-name",
+        action="store",
+        dest="mb_refstate_name",
+        default=None,
+        help="The name of the measure boot reference state to operate with",
+    )
     parser.add_argument(
         "--supported-version",
         default=None,
@@ -1772,5 +1858,15 @@ def main() -> None:
             mytenant.do_delete_runtime_policy(None)
     elif args.command == "updateruntimepolicy":
         mytenant.do_update_runtime_policy(vars(args))
+    elif args.command == "addmbrefstate":
+        mytenant.do_add_mb_refstate(vars(args))
+    elif args.command == "updatembrefstate":
+        mytenant.do_update_mb_refstate(vars(args))
+    elif args.command == "showmbrefstate":
+        mytenant.do_show_mb_refstate(args.mb_refstate_name)
+    elif args.command == "deletembrefstate":
+        mytenant.do_delete_mb_refstate(args.mb_refstate_name)
+    elif args.command == "listmbrefstate":
+        mytenant.do_list_mb_refstate()
     else:
         raise UserError(f"Invalid command specified: {args.command}")

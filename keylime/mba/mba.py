@@ -1,3 +1,4 @@
+import hashlib
 import importlib
 from inspect import isfunction
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
@@ -185,3 +186,21 @@ def _find_implementation(functionname: str) -> Any:
         if hasattr(m, functionname) and isfunction(getattr(m, functionname)):
             return m
     raise ValueError(f"No implementation for function {functionname} found among measured boot imports")
+
+
+def mb_refstate_db_contents(mb_refstate_name: str, mb_refstate: Optional[str]) -> Dict[str, Any]:
+    """Assembles a mb_refstate dictionary to be written on the database"""
+    mb_refstate_db_format: Dict[str, Any] = {}
+    mb_refstate_db_format["name"] = mb_refstate_name
+
+    # TODO: Verifier can get the policy validated by the measured boot policy engine
+
+    mb_refstate_db_format["mb_refstate"] = mb_refstate
+    if mb_refstate is not None:
+        sha256 = hashlib.sha256()
+        sha256.update(mb_refstate.encode())
+        mb_refstate_db_format["checksum"] = sha256.hexdigest()
+    else:
+        mb_refstate_db_format["checksum"] = None
+
+    return mb_refstate_db_format

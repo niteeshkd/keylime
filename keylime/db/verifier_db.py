@@ -28,7 +28,9 @@ class VerfierMain(Base):
     ima_policy = relationship("VerifierAllowlist", back_populates="agent", uselist=False)
     ima_policy_id = Column(Integer, ForeignKey("allowlists.id"))
     ima_sign_verification_keys = Column(Text().with_variant(Text(429400000), "mysql"))
-    mb_refstate = Column(Text().with_variant(Text(429400000), "mysql"))
+    # mb_refstate = Column(Text().with_variant(Text(429400000), "mysql"))
+    mb_refstate = relationship("VerifierMbrefstate", back_populates="agent", uselist=False)
+    mb_refstate_id = Column(Integer, ForeignKey("mbrefstates.id"))
     revocation_key = Column(String(2800))
     accept_tpm_hash_algs = Column(JSONPickleType(pickler=JSONPickler))
     accept_tpm_encryption_algs = Column(JSONPickleType(pickler=JSONPickler))
@@ -62,3 +64,13 @@ class VerifierAllowlist(Base):
     generator = Column(Integer)
     tpm_policy = Column(Text())
     ima_policy = Column(Text().with_variant(Text(429400000), "mysql"))
+
+
+class VerifierMbrefstate(Base):
+    __tablename__ = "mbrefstates"
+    __table_args__ = (schema.UniqueConstraint("name", name="uniq_mbrefstates0name"),)
+    id = Column(Integer, primary_key=True)
+    agent = relationship("VerfierMain", back_populates="mb_refstate")
+    name = Column(String(255), nullable=False)
+    checksum = Column(String(128), nullable=True)
+    mb_refstate = Column(Text().with_variant(Text(429400000), "mysql"))

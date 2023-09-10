@@ -28,6 +28,7 @@ class ArgsType(TypedDict):
     runtime_policy_sig_key: Optional[str]
     runtime_policy_checksum: str
     mb_refstate: Optional[str]
+    mb_refstate_name: str
 
 
 logger = keylime_logging.init_logging("cli.policies")
@@ -51,10 +52,11 @@ def enforce_pcrs(tpm_policy: Dict[str, Any], protected_pcrs: List[int], pcr_use:
             sys.exit(1)
 
 
-def process_policy(args: ArgsType) -> Tuple[Dict[str, Any], Optional[str], str, Optional[str], str, str]:
+def process_policy(args: ArgsType) -> Tuple[Dict[str, Any], Optional[str], str, str, Optional[str], str, str]:
     tpm_policy_str = "{}"
     runtime_policy_name = ""
     mb_refstate = None
+    mb_refstate_name = ""
     ima_sign_verification_keys: Optional[str] = ""
     runtime_policy = ""
     runtime_policy_key = ""
@@ -173,9 +175,17 @@ def process_policy(args: ArgsType) -> Tuple[Dict[str, Any], Optional[str], str, 
         # Process measured boot reference state
         mb_refstate = mb_refstate_data
 
+    # Store measured boot reference state name
+    if "mb_refstate_name" in args and args["mb_refstate_name"] is not None:
+        mb_refstate_name = args["mb_refstate_name"]
+        # Auto-enable TPM event log mesured boot (or-bit mask)
+        for _pcr in config.MEASUREDBOOT_PCRS:
+            tpm_policy["mask"] = hex(int(tpm_policy["mask"], 0) | (1 << _pcr))
+
     return (
         tpm_policy,
         mb_refstate,
+        mb_refstate_name,
         runtime_policy_name,
         ima_sign_verification_keys,
         runtime_policy,

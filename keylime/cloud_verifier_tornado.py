@@ -35,13 +35,16 @@ from keylime.common import retry, states, validators
 from keylime.common.version import str_to_version
 from keylime.da import record
 from keylime.db.keylime_db import DBEngineManager, SessionManager
-from keylime.db.verifier_db import VerfierMain, VerifierAllowlist
+from keylime.db.verifier_db import VerfierMain, VerifierAllowlist, VerifierMbrefstate
 from keylime.failure import MAX_SEVERITY_LABEL, Component, Event, Failure, set_severity_config
 from keylime.ima import ima
+from keylime.mba import mba
 
 logger = keylime_logging.init_logging("verifier")
 
 GLOBAL_POLICY_CACHE: Dict[str, Dict[str, str]] = {}
+
+GLOBAL_MBPOLICY_CACHE: Dict[str, Dict[str, str]] = {}
 
 set_severity_config(config.getlist("verifier", "severity_labels"), config.getlist("verifier", "severity_policy"))
 
@@ -97,7 +100,6 @@ def _from_db_obj(agent_db_obj: VerfierMain) -> Dict[str, Any]:
         "public_key",
         "tpm_policy",
         "meta_data",
-        "mb_refstate",
         "ima_sign_verification_keys",
         "revocation_key",
         "accept_tpm_hash_algs",
@@ -170,10 +172,53 @@ def verifier_read_policy_from_cache(stored_agent: VerfierMain) -> str:
     return GLOBAL_POLICY_CACHE[agent_id][checksum]
 
 
+def verifier_read_mbpolicy_from_cache(stored_agent: VerfierMain) -> Optional[str]:
+    checksum = None
+    agent_id = str(stored_agent.agent_id)
+
+    if agent_id not in GLOBAL_MBPOLICY_CACHE:
+        GLOBAL_MBPOLICY_CACHE[agent_id] = {}
+        GLOBAL_MBPOLICY_CACHE[agent_id][""] = ""
+
+    if stored_agent.mb_refstate:
+        checksum = stored_agent.mb_refstate.checksum
+        name = stored_agent.mb_refstate.name
+
+    if checksum is not None:
+        # Update the cache if checksum is not found in the cache
+        if checksum not in GLOBAL_MBPOLICY_CACHE[agent_id]:
+            if len(GLOBAL_MBPOLICY_CACHE[agent_id]) > 1:
+                # Perform a cleanup of the contents, MB policy checksum changed
+                logger.debug(
+                    "Cleaning up mbpolicy cache for mbpolicy named %s, with checksum %s, used by agent %s",
+                    name,
+                    checksum,
+                    agent_id,
+                )
+                GLOBAL_MBPOLICY_CACHE[agent_id] = {}
+                GLOBAL_MBPOLICY_CACHE[agent_id][""] = ""
+
+            logger.debug(
+                "MB policy named %s, with checksum %s, used by agent %s is not present on mbpolicy cache on this verifier, performing SQLAlchemy load",
+                name,
+                checksum,
+                agent_id,
+            )
+
+            # Contact the database and load the (large) mb_refstate column for "mbrefstates" table
+            mb_refstate = stored_agent.mb_refstate.mb_refstate
+            GLOBAL_MBPOLICY_CACHE[agent_id][checksum] = mb_refstate
+
+        return GLOBAL_MBPOLICY_CACHE[agent_id][checksum]
+
+    return None
+
+
 def verifier_db_delete_agent(session: Session, agent_id: str) -> None:
     get_AgentAttestStates().delete_by_agent_id(agent_id)
     session.query(VerfierMain).filter_by(agent_id=agent_id).delete()
     session.query(VerifierAllowlist).filter_by(name=agent_id).delete()
+    session.query(VerifierMbrefstate).filter_by(name=agent_id).delete()
     session.commit()
 
 
@@ -371,6 +416,9 @@ class AgentsHandler(BaseHandler):
                             VerifierAllowlist.checksum, VerifierAllowlist.generator  # pyright: ignore
                         )
                     )
+                    .options(  # type: ignore
+                        joinedload(VerfierMain.mb_refstate).load_only(VerifierMbrefstate.checksum)  # pyright: ignore
+                    )
                     .filter_by(agent_id=agent_id)
                     .one_or_none()
                 )
@@ -395,6 +443,11 @@ class AgentsHandler(BaseHandler):
                                 VerifierAllowlist.checksum, VerifierAllowlist.generator  # pyright: ignore
                             )
                         )
+                        .options(  # type: ignore
+                            joinedload(VerfierMain.mb_refstate).load_only(
+                                VerifierMbrefstate.checksum
+                            )  # pyright: ignore
+                        )
                         .filter_by(verifier_id=rest_params["verifier"])
                         .all()
                     )
@@ -405,6 +458,11 @@ class AgentsHandler(BaseHandler):
                             joinedload(VerfierMain.ima_policy).load_only(
                                 VerifierAllowlist.checksum, VerifierAllowlist.generator  # pyright: ignore
                             )
+                        )
+                        .options(  # type: ignore
+                            joinedload(VerfierMain.mb_refstate).load_only(
+                                VerifierMbrefstate.checksum
+                            )  # pyright: ignore
                         )
                         .all()
                     )
@@ -517,7 +575,6 @@ class AgentsHandler(BaseHandler):
                         "public_key": "",
                         "tpm_policy": json_body["tpm_policy"],
                         "meta_data": json_body["metadata"],
-                        "mb_refstate": json_body["mb_refstate"],
                         "ima_sign_verification_keys": json_body["ima_sign_verification_keys"],
                         "revocation_key": json_body["revocation_key"],
                         "accept_tpm_hash_algs": json_body["accept_tpm_hash_algs"],
@@ -676,10 +733,84 @@ class AgentsHandler(BaseHandler):
                             logger.error("SQLAlchemy Error while updating ima policy for agent ID %s: %s", agent_id, e)
                             raise
 
-                    # Write the agent to the database, attaching associated stored policy
+                    # Handle mb_refstate with/without name
+                    # - Name, no mb_refstate   : fetch existing mb_refstate from DB
+                    # - Name, mb_refstate      : store mb_refstate (but not oversrite) using name
+                    # - No name, no mb_refstate: store None using agent UUID as name
+                    # - No name, mb_refstate   : store mb_refstate (but not overwrite ?) using agent UUID as name
+
+                    mb_refstate_name = json_body["mb_refstate_name"]
+                    mb_refstate = json_body["mb_refstate"]
+                    mb_refstate_stored = None
+
+                    if mb_refstate_name:
+                        try:
+                            mb_refstate_stored = (
+                                session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).one_or_none()
+                            )
+                        except SQLAlchemyError as e:
+                            logger.error("SQLAlchemy Error for agent ID %s: %s", agent_id, e)
+                            raise
+
+                        # Prevent overwriting existing mb_refstate with name provided in request
+                        if mb_refstate and mb_refstate_stored:
+                            web_util.echo_json_response(
+                                self,
+                                409,
+                                f"mb_refstate with name {mb_refstate_name} already exists. Please use a different name or delete the mb_refstate from the verifier.",
+                            )
+                            logger.warning("mb_refstate with name %s already exists", mb_refstate_name)
+                            return
+
+                        # Return error if the mb_refstate is neither provided nor stored.
+                        if not mb_refstate and not mb_refstate_stored:
+                            web_util.echo_json_response(
+                                self, 404, f"Could not find mb_refstate with name {mb_refstate_name}!"
+                            )
+                            logger.warning("Could not find mb_refstate with name %s", mb_refstate_name)
+                            return
+
+                    else:
+                        if not mb_refstate_name and not mb_refstate:
+                            logger.info("Neither mb_refstate_name nor mb_refstate is provided!")
+
+                        # Use the UUID of the agent if name is not provided.
+                        mb_refstate_name = agent_id
+                        try:
+                            mb_refstate_stored = (
+                                session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).one_or_none()
+                            )
+                        except SQLAlchemyError as e:
+                            logger.error("SQLAlchemy Error for agent ID %s: %s", agent_id, e)
+                            raise
+
+                        if mb_refstate_stored is None:
+                            try:
+                                mb_refstate_db_format = mba.mb_refstate_db_contents(mb_refstate_name, mb_refstate)
+                                mb_refstate_stored = VerifierMbrefstate(**mb_refstate_db_format)
+                                session.add(mb_refstate_stored)
+                                session.commit()
+                            except SQLAlchemyError as e:
+                                logger.error(
+                                    "SQLAlchemy Error while updating mb_refstate for agent ID %s: %s", agent_id, e
+                                )
+                                raise
+                        else:
+                            web_util.echo_json_response(
+                                self,
+                                409,
+                                f"mb_refstate with name {mb_refstate_name} already exists. You can delete the mb_refstate from the verifier.",
+                            )
+                            logger.warning("mb_refstate with name %s already exists", mb_refstate_name)
+                            return
+
+                    # Write the agent to the database, attaching associated stored ima_policy and mb_refstate
                     try:
                         assert runtime_policy_stored
-                        session.add(VerfierMain(**agent_data, ima_policy=runtime_policy_stored))
+                        assert mb_refstate_stored
+                        session.add(
+                            VerfierMain(**agent_data, ima_policy=runtime_policy_stored, mb_refstate=mb_refstate_stored)
+                        )
                         session.commit()
                     except SQLAlchemyError as e:
                         logger.error("SQLAlchemy Error for agent ID %s: %s", agent_id, e)
@@ -999,6 +1130,222 @@ class AllowlistHandler(BaseHandler):
         raise NotImplementedError()
 
 
+class MbrefstateHandler(BaseHandler):
+    def head(self) -> None:
+        web_util.echo_json_response(self, 400, "Mbrefstate handler: HEAD Not Implemented")
+
+    def __validate_input(self, method: str) -> Tuple[bool, Optional[str]]:
+        """Validate the input"""
+
+        if self.request.uri is None:
+            web_util.echo_json_response(self, 400, "Invalid URL")
+            return False, None
+        rest_params = web_util.get_restful_params(self.request.uri)
+        if rest_params is None or "mbrefstates" not in rest_params:
+            web_util.echo_json_response(self, 400, "Invalid URL")
+            return False, None
+
+        if not web_util.validate_api_version(self, cast(str, rest_params["api_version"]), logger):
+            return False, None
+
+        mb_refstate_name = rest_params["mbrefstates"]
+        if mb_refstate_name is None and method != "GET":
+            web_util.echo_json_response(self, 400, "Invalid URL")
+            logger.warning("%s returning 400 response: %s", method, self.request.path)
+            return False, None
+
+        return True, mb_refstate_name
+
+    def get(self) -> None:
+        """Get a mb_refstate or list of names of mbrefstates
+
+        GET /mbrefstates/[name]
+        name is required to get a mb_refstate but not for getting the names of the mbrefstates.
+        """
+
+        params_valid, mb_refstate_name = self.__validate_input("GET")
+        if not params_valid:
+            return
+
+        session = get_session()
+        if mb_refstate_name is None:
+            try:
+                names_mbrefstates = session.query(VerifierMbrefstate.name).all()
+            except SQLAlchemyError as e:
+                logger.error("SQLAlchemy Error: %s", e)
+                web_util.echo_json_response(self, 500, "Failed to get names of mbrefstates")
+                raise
+
+            names_response = []
+            for name in names_mbrefstates:
+                names_response.append(name[0])
+            web_util.echo_json_response(self, 200, "Success", {"mbrefstate names": names_response})
+
+        else:
+            try:
+                mbrefstate = session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).one()
+            except NoResultFound:
+                web_util.echo_json_response(self, 404, f"Measured boot refstate {mb_refstate_name} not found")
+                return
+            except SQLAlchemyError as e:
+                logger.error("SQLAlchemy Error: %s", e)
+                web_util.echo_json_response(self, 500, "Failed to get mb_refstate")
+                raise
+
+            response = {}
+            response["name"] = getattr(mbrefstate, "name", None)
+            response["mb_refstate"] = getattr(mbrefstate, "mb_refstate", None)
+            web_util.echo_json_response(self, 200, "Success", response)
+
+    def delete(self) -> None:
+        """Delete a mb_refstate
+
+        DELETE /mbrefstates/{name}
+        """
+
+        params_valid, mb_refstate_name = self.__validate_input("DELETE")
+        if not params_valid or mb_refstate_name is None:
+            return
+
+        session = get_session()
+        try:
+            mbrefstate = session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).one()
+        except NoResultFound:
+            web_util.echo_json_response(self, 404, f"Measured boot refstate {mb_refstate_name} not found")
+            return
+        except SQLAlchemyError as e:
+            logger.error("SQLAlchemy Error: %s", e)
+            web_util.echo_json_response(self, 500, "Failed to get mb_refstate")
+            raise
+
+        try:
+            agent = session.query(VerfierMain).filter_by(mb_refstate_id=mbrefstate.id).one_or_none()
+        except SQLAlchemyError as e:
+            logger.error("SQLAlchemy Error: %s", e)
+            raise
+        if agent is not None:
+            web_util.echo_json_response(
+                self,
+                409,
+                f"Can't delete mb_refstate as it's currently in use by agent {agent.agent_id}",
+            )
+            return
+
+        try:
+            session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).delete()
+            session.commit()
+        except SQLAlchemyError as e:
+            logger.error("SQLAlchemy Error: %s", e)
+            session.close()
+            web_util.echo_json_response(self, 500, f"Database error: {e}")
+            raise
+
+        # NOTE(kaifeng) 204 Can not have response body, but current helper
+        # doesn't support this case.
+        self.set_status(204)
+        self.set_header("Content-Type", "application/json")
+        self.finish()
+        logger.info("DELETE returning 204 response for mb_refstate: %s", mb_refstate_name)
+
+    def __get_mb_refstate_db_format(self, mb_refstate_name: str) -> Dict[str, Any]:
+        """Get the measured boot refstate from the request and return it in Db format"""
+
+        content_length = len(self.request.body)
+        if content_length == 0:
+            web_util.echo_json_response(self, 400, "Expected non zero content length")
+            logger.warning("POST returning 400 response. Expected non zero content length.")
+            return {}
+
+        json_body = json.loads(self.request.body)
+        mb_refstate = json_body.get("mb_refstate")
+        return mba.mb_refstate_db_contents(mb_refstate_name, mb_refstate)
+
+    def post(self) -> None:
+        """Create a mb_refstate
+
+        POST /mbrefstates/{name}
+        body: ...
+        """
+
+        params_valid, mb_refstate_name = self.__validate_input("POST")
+        if not params_valid or mb_refstate_name is None:
+            return
+
+        mb_refstate_db_format = self.__get_mb_refstate_db_format(mb_refstate_name)
+        if not mb_refstate_db_format:
+            return
+
+        session = get_session()
+        # don't allow overwritting
+        try:
+            mbrefstate_count = session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).count()
+            if mbrefstate_count > 0:
+                web_util.echo_json_response(
+                    self, 409, f"Measured boot refstate with name {mb_refstate_name} already exists"
+                )
+                logger.warning("Measured boot refstate with name %s already exists", mb_refstate_name)
+                return
+        except SQLAlchemyError as e:
+            logger.error("SQLAlchemy Error: %s", e)
+            raise
+
+        try:
+            # Add the data
+            session.add(VerifierMbrefstate(**mb_refstate_db_format))
+            session.commit()
+        except SQLAlchemyError as e:
+            logger.error("SQLAlchemy Error: %s", e)
+            raise
+
+        web_util.echo_json_response(self, 201)
+        logger.info("POST returning 201")
+
+    def put(self) -> None:
+        """Update an mb_refstate
+
+        PUT /mbrefstates/{name}
+        body: ...
+        """
+
+        params_valid, mb_refstate_name = self.__validate_input("PUT")
+        if not params_valid or mb_refstate_name is None:
+            return
+
+        mb_refstate_db_format = self.__get_mb_refstate_db_format(mb_refstate_name)
+        if not mb_refstate_db_format:
+            return
+
+        session = get_session()
+        # don't allow creating a new policy
+        try:
+            mbrefstate_count = session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).count()
+            if mbrefstate_count != 1:
+                web_util.echo_json_response(
+                    self, 409, f"Measured boot refstate with name {mb_refstate_name} does not already exist"
+                )
+                logger.warning("Measured boot refstate with name %s does not already exist", mb_refstate_name)
+                return
+        except SQLAlchemyError as e:
+            logger.error("SQLAlchemy Error: %s", e)
+            raise
+
+        try:
+            # Update the named mb_refstate
+            session.query(VerifierMbrefstate).filter_by(name=mb_refstate_name).update(
+                mb_refstate_db_format  # pyright: ignore
+            )
+            session.commit()
+        except SQLAlchemyError as e:
+            logger.error("SQLAlchemy Error: %s", e)
+            raise
+
+        web_util.echo_json_response(self, 201)
+        logger.info("PUT returning 201")
+
+    def data_received(self, chunk: Any) -> None:
+        raise NotImplementedError()
+
+
 async def update_agent_api_version(agent: Dict[str, Any], timeout: float = 60.0) -> Union[Dict[str, Any], None]:
     agent_id = agent["agent_id"]
 
@@ -1074,7 +1421,7 @@ async def update_agent_api_version(agent: Dict[str, Any], timeout: float = 60.0)
 
 
 async def invoke_get_quote(
-    agent: Dict[str, Any], runtime_policy: str, need_pubkey: bool, timeout: float = 60.0
+    agent: Dict[str, Any], mb_refstate: Optional[str], runtime_policy: str, need_pubkey: bool, timeout: float = 60.0
 ) -> None:
     failure = Failure(Component.INTERNAL, ["verifier"])
 
@@ -1151,9 +1498,11 @@ async def invoke_get_quote(
 
             if rmc:
                 rmc.record_create(agent, json_response, runtime_policy)
+                # TODO: Need to pass mb_refstate seperately to record_create()
 
             failure = cloud_verifier_common.process_quote_response(
                 agent,
+                mb_refstate,
                 ima.deserialize_runtime_policy(runtime_policy),
                 json_response["results"],
                 agentAttestState,
@@ -1334,11 +1683,15 @@ async def process_agent(
     try:  # pylint: disable=R1702
         main_agent_operational_state = agent["operational_state"]
         stored_agent = None
+
         try:
             stored_agent = (
                 session.query(VerfierMain)
                 .options(  # type: ignore
                     joinedload(VerfierMain.ima_policy).load_only(VerifierAllowlist.checksum)  # pyright: ignore
+                )
+                .options(  # type: ignore
+                    joinedload(VerfierMain.mb_refstate).load_only(VerifierMbrefstate.checksum)  # pyright: ignore
                 )
                 .filter_by(agent_id=str(agent["agent_id"]))
                 .first()
@@ -1409,8 +1762,10 @@ async def process_agent(
         except SQLAlchemyError as e:
             logger.error("SQLAlchemy Error for agent ID %s: %s", agent["agent_id"], e)
 
-        # Load agent's IMA policy
+        # Load agent's IMA and Measured Boot policies
         runtime_policy = verifier_read_policy_from_cache(stored_agent)
+        mb_refstate = verifier_read_mbpolicy_from_cache(stored_agent)
+        logger.info("TEMPDBG: mb_refstate = %s", mb_refstate)
 
         # If agent was in a failed state we check if we either stop polling
         # or just add it again to the event loop
@@ -1419,14 +1774,14 @@ async def process_agent(
                 logger.warning("Agent %s failed, stopping polling", agent["agent_id"])
                 return
 
-            await invoke_get_quote(agent, runtime_policy, False, timeout=timeout)
+            await invoke_get_quote(agent, mb_refstate, runtime_policy, False, timeout=timeout)
             return
 
         # if new, get a quote
         if main_agent_operational_state == states.START and new_operational_state == states.GET_QUOTE:
             agent["num_retries"] = 0
             agent["operational_state"] = states.GET_QUOTE
-            await invoke_get_quote(agent, runtime_policy, True, timeout=timeout)
+            await invoke_get_quote(agent, mb_refstate, runtime_policy, True, timeout=timeout)
             return
 
         if main_agent_operational_state == states.GET_QUOTE and new_operational_state == states.PROVIDE_V:
@@ -1443,14 +1798,14 @@ async def process_agent(
             interval = config.getfloat("verifier", "quote_interval")
             agent["operational_state"] = states.GET_QUOTE
             if interval == 0:
-                await invoke_get_quote(agent, runtime_policy, False, timeout=timeout)
+                await invoke_get_quote(agent, mb_refstate, runtime_policy, False, timeout=timeout)
             else:
                 logger.debug(
                     "Setting up callback to check agent ID %s again in %f seconds", agent["agent_id"], interval
                 )
 
                 pending = tornado.ioloop.IOLoop.current().call_later(
-                    interval, invoke_get_quote, agent, runtime_policy, False, timeout=timeout  # type: ignore  # due to python <3.9
+                    interval, invoke_get_quote, agent, mb_refstate, runtime_policy, False, timeout=timeout  # type: ignore  # due to python <3.9
                 )
                 agent["pending_event"] = pending
             return
@@ -1485,7 +1840,7 @@ async def process_agent(
                     next_retry,
                 )
                 tornado.ioloop.IOLoop.current().call_later(
-                    next_retry, invoke_get_quote, agent, runtime_policy, True, timeout=timeout  # type: ignore  # due to python <3.9
+                    next_retry, invoke_get_quote, agent, mb_refstate, runtime_policy, True, timeout=timeout  # type: ignore  # due to python <3.9
                 )
             return
 
@@ -1608,6 +1963,7 @@ def main() -> None:
         [
             (r"/v?[0-9]+(?:\.[0-9]+)?/agents/.*", AgentsHandler),
             (r"/v?[0-9]+(?:\.[0-9]+)?/allowlists/.*", AllowlistHandler),
+            (r"/v?[0-9]+(?:\.[0-9]+)?/mbrefstates/.*", MbrefstateHandler),
             (r"/versions?", VersionHandler),
             (r".*", MainHandler),
         ]

@@ -34,6 +34,7 @@ def get_AgentAttestStates() -> AgentAttestStates:
 
 def process_quote_response(
     agent: Dict[str, Any],
+    mb_refstate: Optional[str],
     runtime_policy: RuntimePolicyType,
     json_response: Dict[str, Any],
     agentAttestState: AgentAttestState,
@@ -198,7 +199,7 @@ def process_quote_response(
         algorithms.Hash(hash_alg),
         ima_keyrings,
         mb_measurement_list,
-        agent["mb_refstate"],
+        mb_refstate,
         compressed=(agent["supported_version"] == "1.0"),
         count=agent["attestation_count"],
     )  # TODO: change this to always False after initial update
@@ -260,16 +261,8 @@ def prepare_get_quote(agent: Dict[str, Any]) -> Dict[str, Union[str, int]]:
 
 def process_get_status(agent: VerfierMain) -> Dict[str, Any]:
     has_mb_refstate = 0
-    try:
-        if mba.policy_is_valid(cast(str, agent.mb_refstate)):
-            has_mb_refstate = 1
-    except Exception as e:
-        logger.warning(
-            'Non-fatal problem ocurred while attempting to evaluate agent %s attribute "mb_refstate" (%s). Will just consider the value of this attribute as empty',
-            agent.agent_id,
-            e.args,
-        )
-        logger.debug('The contents of the agent %s attribute "mb_refstate" are %s', agent.agent_id, agent.mb_refstate)
+    if agent.mb_refstate.checksum:
+        has_mb_refstate = 1
 
     has_runtime_policy = 0
     if agent.ima_policy.generator and agent.ima_policy.generator > 1:
