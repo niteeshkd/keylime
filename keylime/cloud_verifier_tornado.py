@@ -1097,6 +1097,8 @@ async def invoke_get_quote(
     )
     response = await res
 
+    logger.warning("TMPDBG: response status_code = %s", response.status_code)
+
     if response.status_code != 200:
         # this is a connection error, retry get quote
         if response.status_code in [408, 500, 599]:
