@@ -246,7 +246,7 @@ class Tpm:
         if mba.policy_is_valid(mb_refstate):
             logger.info("TEMPDBG: mb_measurement_list : %s", mb_measurement_list)
             if not mb_failure:
-                logger.info("TEMPDBG: mb_failure exists")
+                logger.info("TEMPDBG: No mb_failure")
 
         pcrs_in_quote: Set[int] = set()  # PCRs in quote that were already used for some kind of validation
 
