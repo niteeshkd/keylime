@@ -244,10 +244,13 @@ class Tpm:
         failure.merge(mb_failure)
 
         if mba.policy_is_valid(mb_refstate):
+            logger.info("TEMPDBG: mb_policy is valid")
             logger.info("TEMPDBG: mb_measurement_list : %s", mb_measurement_list)
             if not mb_failure:
                 logger.info("TEMPDBG: No mb_failure")
-
+        else:
+            logger.info("TEMPDBG: mb_policy is invalid")
+ 
         pcrs_in_quote: Set[int] = set()  # PCRs in quote that were already used for some kind of validation
 
         pcr_nums = set(pcrs_dict.keys())
